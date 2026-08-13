@@ -4,11 +4,15 @@ project(AutoClikerSiris LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# статическая CRT — exe не требует рядом msvcp140.dll и т.п.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+
 add_executable(AutoCliker-Siris WIN32
     src/main.cpp
     src/clicker.cpp
     src/settings.cpp
     src/ui.cpp
+    app.rc
 )
 
 target_include_directories(AutoCliker-Siris PRIVATE src)

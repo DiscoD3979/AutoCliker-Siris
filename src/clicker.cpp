@@ -70,11 +70,21 @@ void Clicker::ResetClicks() { clicks_.store(0); }
 void Clicker::Run() {
     timeBeginPeriod(1); // точность сна ~1 мс
 
+    // задержка перед стартом
+    if (s_.startDelayMs > 0) {
+        const double end = NowMs() + (double)s_.startDelayMs;
+        while (running_.load() && NowMs() < end)
+            Sleep(10);
+    }
+
     const bool hold = s_.clickType == 3;
+    if (s_.fixedPos)
+        SetCursorPos(s_.posX, s_.posY);
     if (hold)
         Press(s_.button, true);
 
     std::mt19937 rng(std::random_device{}());
+    const double startT = NowMs();
     double next = NowMs();
     long long done = 0;
 
@@ -90,6 +100,9 @@ void Clicker::Run() {
             next = now;
         }
 
+        if (s_.fixedPos)
+            SetCursorPos(s_.posX, s_.posY);
+
         if (!hold) {
             const int n = s_.clickType == 2 ? 3 : (s_.clickType == 1 ? 2 : 1);
             for (int i = 0; i < n; ++i) {
@@ -102,6 +115,8 @@ void Clicker::Run() {
 
         if (s_.fixedCount && ++done >= (long long)s_.count)
             break;
+        if (s_.runSeconds > 0 && NowMs() - startT >= (double)s_.runSeconds * 1000.0)
+            break;
 
         double interval;
         if (s_.randomInterval && s_.maxMs > s_.minMs) {
@@ -110,7 +125,7 @@ void Clicker::Run() {
         } else if (s_.randomInterval) {
             interval = (double)s_.minMs;
         } else {
-            interval = 1000.0 / (s_.cps > 0.01 ? s_.cps : 0.01);
+            interval = s_.intervalMs > 0.0 ? s_.intervalMs : 1.0;
         }
         next += interval;
     }
