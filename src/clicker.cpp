@@ -23,12 +23,12 @@ DWORD UpFlag(int button) {
 }
 
 void ClickOnce(int button) {
-    INPUT in{};
-    in.type = INPUT_MOUSE;
-    in.mi.dwFlags = DownFlag(button);
-    SendInput(1, &in, sizeof(INPUT));
-    in.mi.dwFlags = UpFlag(button);
-    SendInput(1, &in, sizeof(INPUT));
+    INPUT in[2]{};
+    in[0].type = INPUT_MOUSE;
+    in[0].mi.dwFlags = DownFlag(button);
+    in[1].type = INPUT_MOUSE;
+    in[1].mi.dwFlags = UpFlag(button);
+    SendInput(2, in, sizeof(INPUT));
 }
 
 void Press(int button, bool down) {
@@ -70,6 +70,7 @@ void Clicker::ResetClicks() { clicks_.store(0); }
 
 void Clicker::Run() {
     timeBeginPeriod(1); // точность сна ~1 мс
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 
     // задержка перед стартом
     if (s_.startDelayMs > 0) {
@@ -87,6 +88,33 @@ void Clicker::Run() {
 
     std::mt19937 rng(std::random_device{}());
     const double startT = NowMs();
+
+    if (s_.extra && !hold) {
+        // экстра: клики пачками в одном вызове SendInput — максимальная скорость
+        const int n = s_.clickType == 2 ? 3 : (s_.clickType == 1 ? 2 : 1);
+        constexpr int kBatch = 8;
+        INPUT in[kBatch * 6]{};
+        for (int i = 0; i < kBatch * n; ++i) {
+            in[i * 2].type = INPUT_MOUSE;
+            in[i * 2].mi.dwFlags = DownFlag(s_.button);
+            in[i * 2 + 1].type = INPUT_MOUSE;
+            in[i * 2 + 1].mi.dwFlags = UpFlag(s_.button);
+        }
+        const int perCall = kBatch * n;
+        long long done = 0;
+        while (running_.load()) {
+            SendInput((UINT)(perCall * 2), in, sizeof(INPUT));
+            clicks_.fetch_add(perCall);
+            done += perCall;
+            if (s_.fixedCount && done >= s_.count)
+                break;
+            if (s_.runSeconds > 0 && NowMs() - startT >= (double)s_.runSeconds * 1000.0)
+                break;
+        }
+        timeEndPeriod(1);
+        return;
+    }
+
     double next = NowMs();
     long long done = 0;
 
@@ -117,23 +145,19 @@ void Clicker::Run() {
             interval = s_.intervalMs > 0.0 ? s_.intervalMs : 1.0;
         }
 
-        if (!hold) {
-            const int n = s_.clickType == 2 ? 3 : (s_.clickType == 1 ? 2 : 1);
-            if (n > 1) {
-                const double gap = s_.extra ? 0.0 : std::clamp(interval / 10.0, 1.0, 10.0);
-                const double start = NowMs();
-                for (int i = 0; i < n; ++i) {
-                    ClickOnce(s_.button);
-                    if (i + 1 < n) {
-                        const double target = start + gap * (i + 1);
-                        while (running_.load() && NowMs() < target) { }
-                    }
-                }
-            } else {
-                ClickOnce(s_.button);
+if (!hold) {
+        const int n = s_.clickType == 2 ? 3 : (s_.clickType == 1 ? 2 : 1);
+        const double gap = s_.extra ? 0.0 : std::clamp(interval / 10.0, 1.0, 10.0);
+        const double start = NowMs();
+        for (int i = 0; i < n; ++i) {
+            ClickOnce(s_.button);
+            clicks_.fetch_add(1);
+            if (i + 1 < n && gap > 0.0) {
+                const double target = start + gap * (i + 1);
+                while (running_.load() && NowMs() < target) { }
             }
         }
-        clicks_.fetch_add(1);
+    }
 
         if (s_.fixedCount && ++done >= (long long)s_.count)
             break;

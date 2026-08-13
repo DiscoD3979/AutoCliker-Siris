@@ -54,6 +54,8 @@ struct App {
     int hover = 0;          // id подсвеченного пункта: 1=random, 2..4=кнопки, 5..8=типы, 9=фикс, 10..12=режимы, 13=защита
     HWND hoveredEdit = nullptr;
     int pulse = 0;
+    long long lastClicks = 0;
+    int cps = 0;
 
     RECT rcPanels[4]{}, rcCk{}, rcRandMin{}, rcRandMax{}, rcFix{}, rcX{}, rcY{}, rcPickBtn{};
     RECT rcBtn[3]{}, rcType[4]{}, rcMode[3]{}, rcExtra{};
@@ -508,7 +510,11 @@ void PaintStatus(Graphics& g, int W) {
     g.DrawString(app.running ? L"Работает" : L"Остановлен", -1, app.fBold, PointF(48.0f, 674.0f), &tb);
 
     wchar_t b[64];
-    swprintf_s(b, L"Кликов: %lld", (long long)app.clicker.Clicks());
+    if (app.running)
+        swprintf_s(b, L"Кликов: %lld   Скорость: %d/с",
+                   (long long)app.clicker.Clicks(), app.cps);
+    else
+        swprintf_s(b, L"Кликов: %lld", (long long)app.clicker.Clicks());
     SolidBrush cb(Col(theme::kTextDim));
     StringFormat fr;
     fr.SetAlignment(StringAlignmentFar);
@@ -825,6 +831,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (wParam == kTimerId) {
                 if (app.running) {
                     app.pulse ^= 1;
+                    const long long cl = app.clicker.Clicks();
+                    app.cps = (int)((cl - app.lastClicks) * 20);
+                    app.lastClicks = cl;
                     InvalidateRect(hwnd, &app.rcStatus, FALSE);
                     // защита: курсор вернулся на окно приложения — стоп
                     POINT c;
