@@ -79,7 +79,8 @@ void Clicker::Run() {
     }
 
     const bool hold = s_.clickType == 3;
-    if (s_.fixedPos)
+    const bool fp = s_.fixedPos && (s_.posX != 0 || s_.posY != 0);
+    if (fp)
         SetCursorPos(s_.posX, s_.posY);
     if (hold)
         Press(s_.button, true);
@@ -101,7 +102,7 @@ void Clicker::Run() {
             next = now;
         }
 
-        if (s_.fixedPos)
+        if (fp)
             SetCursorPos(s_.posX, s_.posY);
 
         double interval;

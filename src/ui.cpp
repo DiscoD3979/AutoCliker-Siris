@@ -17,9 +17,8 @@ using namespace Gdiplus;
 namespace {
 
 constexpr int kWndW = 380;
-constexpr int kWndH = 798;
+constexpr int kWndH = 748;
 constexpr UINT_PTR kTimerId = 1;
-constexpr UINT_PTR kPickTimerId = 2;
 constexpr int kHotkeyId = 1;
 constexpr UINT WM_APP_POS = WM_APP + 1;
 constexpr UINT WM_APP_POS_CANCEL = WM_APP + 2;
@@ -32,6 +31,10 @@ bool PtIn(const RECT& r, POINT p) {
     return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom;
 }
 
+RECT Expanded(const RECT& r, int d) {
+    return { r.left - d, r.top - d, r.right + d, r.bottom + d };
+}
+
 struct App {
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
@@ -40,6 +43,7 @@ struct App {
     bool running = false;
     bool capturing = false;
     bool picking = false;
+    bool guardReady = false;    // курсор покинул окно после старта — теперь вход в окно останавливает
     HHOOK hook = nullptr;
     HWND hint = nullptr;
     bool hoverMin = false;
@@ -47,14 +51,14 @@ struct App {
     bool hoverStart = false;
     bool hoverStop = false;
     bool hoverPick = false;
-    int hoverRow = 0;
+    int hover = 0;          // id подсвеченного пункта: 1=random, 2..4=кнопки, 5..8=типы, 9=фикс, 10..12=режимы, 13=защита
+    HWND hoveredEdit = nullptr;
     int pulse = 0;
 
     RECT rcPanels[4]{}, rcCk{}, rcRandMin{}, rcRandMax{}, rcFix{}, rcX{}, rcY{}, rcPickBtn{};
     RECT rcBtn[3]{}, rcType[4]{}, rcMode[3]{};
     RECT rcEdCount{}, rcEdTime{}, rcEdDelay{}, rcEdHot{};
     RECT rcBtnStart{}, rcBtnStop{}, rcMinBtn{}, rcCloseBtn{};
-    RECT rcRow1{}, rcRow2{}, rcRow3{}, rcRow4{}, rcRow5{};
     RECT rcStatus{};
 
     HFONT hFontBase = nullptr, hFontBold = nullptr;
@@ -69,9 +73,22 @@ struct App {
     HWND edCount = nullptr, edTime = nullptr, edDelay = nullptr;
     HWND edX = nullptr, edY = nullptr, edHot = nullptr;
     HWND focusedEdit = nullptr;
+    Gdiplus::Bitmap* cache = nullptr;   // кэш базового рендера (без hover/статуса)
+    bool cacheDirty = true;
 } app;
 
 WNDPROC g_origEdit = nullptr;
+
+// полное изменение состояния — перерисовать кэш базы + всё окно
+void InvalidateAll() {
+    app.cacheDirty = true;
+    InvalidateRect(app.hwnd, nullptr, FALSE);
+}
+
+BOOL CALLBACK PrintChild(HWND c, LPARAM lp) {
+    SendMessageW(c, WM_PRINT, (WPARAM)lp, (LPARAM)(PRF_CLIENT | PRF_ERASEBKGND | PRF_NONCLIENT));
+    return TRUE;
+}
 
 void RoundedRect(Graphics& g, const RECT& r, int rad, const Color& fill, const Color& border, float bw) {
     int w = r.right - r.left;
@@ -105,42 +122,63 @@ void RoundedRect(Graphics& g, const RECT& r, int rad, const Color& fill, const C
 }
 
 void InitRects() {
-    app.rcPanels[0] = { 24, 82, 86, 114 };
-    app.rcPanels[1] = { 95, 82, 157, 114 };
-    app.rcPanels[2] = { 166, 82, 228, 114 };
-    app.rcPanels[3] = { 237, 82, 299, 114 };
-    app.rcCk = { 24, 142, 356, 162 };
-    app.rcRandMin = { 54, 166, 124, 198 };
-    app.rcRandMax = { 160, 166, 230, 198 };
-    app.rcBtn[0] = { 24, 254, 116, 278 };
-    app.rcBtn[1] = { 120, 254, 212, 278 };
-    app.rcBtn[2] = { 216, 254, 308, 278 };
-    app.rcType[0] = { 24, 320, 180, 344 };
-    app.rcType[1] = { 200, 320, 356, 344 };
-    app.rcType[2] = { 24, 346, 180, 370 };
-    app.rcType[3] = { 200, 346, 356, 370 };
-    app.rcFix = { 24, 422, 356, 442 };
-    app.rcX = { 48, 446, 118, 478 };
-    app.rcY = { 150, 446, 220, 478 };
-    app.rcPickBtn = { 228, 446, 356, 478 };
-    app.rcMode[0] = { 24, 532, 150, 556 };
-    app.rcMode[1] = { 164, 532, 272, 556 };
-    app.rcMode[2] = { 24, 558, 150, 582 };
-    app.rcEdCount = { 276, 532, 356, 556 };
-    app.rcEdTime = { 164, 558, 244, 582 };
-    app.rcEdDelay = { 164, 590, 244, 622 };
-    app.rcEdHot = { 24, 676, 356, 708 };
-    app.rcBtnStart = { 24, 754, 182, 794 };
-    app.rcBtnStop = { 198, 754, 356, 794 };
-    app.rcMinBtn = { kWndW - 70, 0, kWndW - 38, theme::kTitleH };
-    app.rcCloseBtn = { kWndW - 38, 0, kWndW, theme::kTitleH };
+    app.rcPanels[0] = { 24, 74, 86, 100 };
+    app.rcPanels[1] = { 95, 74, 157, 100 };
+    app.rcPanels[2] = { 166, 74, 228, 100 };
+    app.rcPanels[3] = { 237, 74, 299, 100 };
+    app.rcCk = { 24, 128, 356, 148 };
+    app.rcRandMin = { 54, 150, 124, 176 };
+    app.rcRandMax = { 160, 150, 230, 176 };
+    app.rcBtn[0] = { 24, 226, 116, 250 };
+    app.rcBtn[1] = { 120, 226, 212, 250 };
+    app.rcBtn[2] = { 216, 226, 308, 250 };
+    app.rcType[0] = { 24, 288, 180, 312 };
+    app.rcType[1] = { 200, 288, 356, 312 };
+    app.rcType[2] = { 24, 314, 180, 338 };
+    app.rcType[3] = { 200, 314, 356, 338 };
+    app.rcFix = { 24, 382, 356, 402 };
+    app.rcX = { 48, 404, 118, 430 };
+    app.rcY = { 150, 404, 220, 430 };
+    app.rcPickBtn = { 228, 404, 356, 430 };
+    app.rcMode[0] = { 24, 486, 150, 510 };
+    app.rcMode[1] = { 164, 486, 272, 510 };
+    app.rcMode[2] = { 24, 512, 150, 536 };
+    app.rcEdCount = { 276, 486, 356, 512 };
+    app.rcEdTime = { 164, 512, 244, 538 };
+    app.rcEdDelay = { 164, 542, 244, 568 };
+    app.rcEdHot = { 24, 622, 356, 648 };
+    app.rcStatus = { 24, 672, 356, 694 };
+    app.rcBtnStart = { 24, 698, 182, 738 };
+    app.rcBtnStop = { 198, 698, 356, 738 };
+    app.rcMinBtn = { kWndW - 84, 0, kWndW - 42, theme::kTitleH };
+    app.rcCloseBtn = { kWndW - 42, 0, kWndW, theme::kTitleH };
+}
 
-    app.rcRow1 = { 24, 134, 356, 166 };
-    app.rcRow2 = { 24, 246, 356, 286 };
-    app.rcRow3 = { 24, 312, 356, 378 };
-    app.rcRow4 = { 24, 524, 356, 590 };
-    app.rcRow5 = { 24, 414, 356, 486 };
-    app.rcStatus = { 24, 726, 356, 748 };
+const RECT* HoverRect(int id) {
+    switch (id) {
+        case 1: return &app.rcCk;
+        case 2: case 3: case 4: return &app.rcBtn[id - 2];
+        case 5: case 6: case 7: case 8: return &app.rcType[id - 5];
+        case 9: return &app.rcFix;
+        case 10: case 11: case 12: return &app.rcMode[id - 10];
+        default: return nullptr;
+    }
+}
+
+RECT EditRectOf(HWND h) {
+    if (h == app.edH) return app.rcPanels[0];
+    if (h == app.edM) return app.rcPanels[1];
+    if (h == app.edS) return app.rcPanels[2];
+    if (h == app.edMs) return app.rcPanels[3];
+    if (h == app.edRandMin) return app.rcRandMin;
+    if (h == app.edRandMax) return app.rcRandMax;
+    if (h == app.edCount) return app.rcEdCount;
+    if (h == app.edTime) return app.rcEdTime;
+    if (h == app.edDelay) return app.rcEdDelay;
+    if (h == app.edX) return app.rcX;
+    if (h == app.edY) return app.rcY;
+    if (h == app.edHot) return app.rcEdHot;
+    return {};
 }
 
 std::wstring HotkeyName() {
@@ -211,12 +249,12 @@ void Toggle() {
         app.clicker.Stop();
         app.running = false;
     } else {
+        app.guardReady = false;
         app.clicker.Start(app.set);
         app.running = true;
         app.pulse = 0;
     }
-    SaveSettings(app.set);
-    InvalidateRect(app.hwnd, nullptr, FALSE);
+    InvalidateAll();
 }
 
 // ---------- выбор позиции клика ----------
@@ -252,10 +290,13 @@ LRESULT CALLBACK HintProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 void CreateHint() {
-    POINT c;
-    GetCursorPos(&c);
+    RECT wa;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    const int w = 380, h = 40;
+    const int x = wa.left + (wa.right - wa.left - w) / 2;
+    const int y = wa.top + 24;
     app.hint = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"AutoClikerSirisHint", L"",
-                               WS_POPUP, c.x + 24, c.y + 24, 300, 40, nullptr, nullptr, app.inst, nullptr);
+                               WS_POPUP, x, y, w, h, nullptr, nullptr, app.inst, nullptr);
     ShowWindow(app.hint, SW_SHOWNOACTIVATE);
 }
 
@@ -268,7 +309,6 @@ void DestroyHint() {
 
 void EndPick(int x, int y) {
     app.picking = false;
-    KillTimer(app.hwnd, kPickTimerId);
     DestroyHint();
     ShowWindow(app.hwnd, SW_SHOW);
     SetForegroundWindow(app.hwnd);
@@ -282,7 +322,7 @@ void EndPick(int x, int y) {
         swprintf_s(b, L"%d", y);
         SetWindowTextW(app.edY, b);
     }
-    InvalidateRect(app.hwnd, nullptr, FALSE);
+    InvalidateAll();
 }
 
 LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
@@ -316,7 +356,6 @@ void StartPick() {
         return;
     }
     CreateHint();
-    SetTimer(app.hwnd, kPickTimerId, 50, nullptr);
 }
 
 // ---------- отрисовка ----------
@@ -329,10 +368,18 @@ void Header(Graphics& g, const wchar_t* t, int y) {
     g.DrawLine(&ln, 24.0f, (REAL)(y + 19), (REAL)(kWndW - 24), (REAL)(y + 19));
 }
 
-void DrawTitleBtn(Graphics& g, const RECT& r, const wchar_t* glyph, bool hover) {
-    SolidBrush hb(hover ? Col(theme::kYellow) : Color(255, 28, 28, 33));
+void DrawTitleBtn(Graphics& g, const RECT& r, const wchar_t* glyph, bool hover, bool close) {
+    Color fill, text;
+    if (close) {
+        fill = hover ? Color(255, 232, 17, 35) : Color(255, 36, 18, 18);
+        text = hover ? Color(255, 255, 255, 255) : Color(255, 214, 48, 48);
+    } else {
+        fill = hover ? Col(theme::kYellow) : Color(255, 28, 28, 33);
+        text = hover ? Col(theme::kBg) : Col(theme::kTextDim);
+    }
+    SolidBrush hb(fill);
     g.FillRectangle(&hb, (REAL)r.left, (REAL)r.top, (REAL)(r.right - r.left), (REAL)(r.bottom - r.top));
-    SolidBrush tb(hover ? Col(theme::kBg) : Col(theme::kTextDim));
+    SolidBrush tb(text);
     StringFormat sf;
     sf.SetAlignment(StringAlignmentCenter);
     sf.SetLineAlignment(StringAlignmentCenter);
@@ -352,8 +399,10 @@ void PaintTitle(Graphics& g, int W) {
     RectF m;
     g.MeasureString(L"AutoCliker", -1, app.fTitle, PointF(18.0f, 0.0f), &sf, &m);
     SolidBrush tb(Col(theme::kText));
-    g.DrawString(L"AutoCliker", -1, app.fTitle, PointF(18.0f, 0.0f), &sf, &tb);
-    g.DrawString(L"Siris", -1, app.fTitle, PointF(18.0f + m.Width, 0.0f), &sf, &yel);
+    g.DrawString(L"AutoCliker", -1, app.fTitle,
+                 RectF(18.0f, 0.0f, m.Width + 4.0f, (REAL)theme::kTitleH), &sf, &tb);
+    g.DrawString(L"Siris", -1, app.fTitle,
+                 RectF(18.0f + m.Width, 0.0f, 80.0f, (REAL)theme::kTitleH), &sf, &yel);
 
     SolidBrush vb(Col(theme::kTextDim));
     StringFormat vsf;
@@ -362,34 +411,31 @@ void PaintTitle(Graphics& g, int W) {
     g.DrawString(L"v1.0.0", -1, app.fSmall,
                  RectF(0.0f, 0.0f, (REAL)(app.rcMinBtn.left - 12), (REAL)theme::kTitleH), &vsf, &vb);
 
-    DrawTitleBtn(g, app.rcMinBtn, L"\u2013", app.hoverMin);
-    DrawTitleBtn(g, app.rcCloseBtn, L"\u00D7", app.hoverClose);
-}
-
-void PaintRowHighlight(Graphics& g, const RECT& r) {
-    SolidBrush hb(Col(theme::kBgPanel));
-    RoundedRect(g, r, 6, Col(theme::kBgPanel), Color(255, 0, 0, 0), 0);
+    DrawTitleBtn(g, app.rcMinBtn, L"\u2013", false, false);
+    DrawTitleBtn(g, app.rcCloseBtn, L"\u00D7", false, true);
 }
 
 void PaintCheck(Graphics& g, const RECT& r, bool on, const wchar_t* label, bool hover) {
     if (hover)
-        PaintRowHighlight(g, r);
+        RoundedRect(g, r, 6, Col(theme::kBgPanel), Color(255, 0, 0, 0), 0);
     int top = r.top + (r.bottom - r.top - 16) / 2;
     RECT box = { r.left, top, r.left + 16, top + 16 };
-    RoundedRect(g, box, 4, Col(theme::kBgField), on ? Col(theme::kYellow) : Col(theme::kBorder), 1);
     if (on) {
+        RoundedRect(g, box, 4, Col(theme::kYellow), Col(theme::kYellow), 1);
         Pen ck(Col(theme::kBg), 2.0f);
         g.DrawLine(&ck, (REAL)(box.left + 4), (REAL)(box.top + 8), (REAL)(box.left + 7), (REAL)(box.top + 11));
         g.DrawLine(&ck, (REAL)(box.left + 7), (REAL)(box.top + 11), (REAL)(box.left + 12), (REAL)(box.top + 5));
+    } else {
+        RoundedRect(g, box, 4, Col(theme::kBgField), Col(theme::kBorder), 1);
     }
     SolidBrush lb(Col(theme::kText));
     g.DrawString(label, -1, app.fBase,
                  PointF((REAL)(box.right + 10), (REAL)(r.top + (r.bottom - r.top - 14) / 2)), &lb);
 }
 
-void PaintRadio(Graphics& g, const RECT& r, bool on, const wchar_t* label, bool rowHover) {
-    if (rowHover)
-        PaintRowHighlight(g, r);
+void PaintRadio(Graphics& g, const RECT& r, bool on, const wchar_t* label, bool hover) {
+    if (hover)
+        RoundedRect(g, r, 6, Col(theme::kBgPanel), Color(255, 0, 0, 0), 0);
     int cy = (r.top + r.bottom) / 2;
     SolidBrush fb(Col(theme::kBgField));
     g.FillEllipse(&fb, (REAL)r.left, (REAL)(cy - 8), 16.0f, 16.0f);
@@ -404,9 +450,10 @@ void PaintRadio(Graphics& g, const RECT& r, bool on, const wchar_t* label, bool 
                  PointF((REAL)(r.left + 22), (REAL)(r.top + (r.bottom - r.top - 14) / 2)), &lb);
 }
 
-void PaintEditOutline(Graphics& g, const RECT& r, bool focused) {
+void PaintEditOutline(Graphics& g, const RECT& r, bool focused, bool hovered) {
     RECT o = { r.left - 1, r.top - 1, r.right + 1, r.bottom + 1 };
-    RoundedRect(g, o, 5, Color(255, 0, 0, 0), focused ? Col(theme::kYellow) : Col(theme::kBorder), 1);
+    RoundedRect(g, o, 5, Color(255, 0, 0, 0),
+                focused ? Col(theme::kYellow) : hovered ? Col(theme::kYellowDim) : Col(theme::kBorder), 1);
 }
 
 void PaintButton(Graphics& g, const RECT& r, const wchar_t* label, bool primary, bool enabled, bool hover) {
@@ -453,114 +500,155 @@ void PaintButton(Graphics& g, const RECT& r, const wchar_t* label, bool primary,
 void PaintStatus(Graphics& g, int W) {
     Color dc = app.running ? (app.pulse ? Col(theme::kYellow) : Col(theme::kYellowDim)) : Col(theme::kGreen);
     SolidBrush db(dc);
-    g.FillEllipse(&db, 30.0f, 732.0f, 10.0f, 10.0f);
+    g.FillEllipse(&db, 30.0f, 678.0f, 10.0f, 10.0f);
 
     SolidBrush tb(app.running ? Col(theme::kYellow) : Col(theme::kTextDim));
-    g.DrawString(app.running ? L"Работает" : L"Остановлен", -1, app.fBold, PointF(48.0f, 728.0f), &tb);
+    g.DrawString(app.running ? L"Работает" : L"Остановлен", -1, app.fBold, PointF(48.0f, 674.0f), &tb);
 
     wchar_t b[64];
     swprintf_s(b, L"Кликов: %lld", (long long)app.clicker.Clicks());
     SolidBrush cb(Col(theme::kTextDim));
     StringFormat fr;
     fr.SetAlignment(StringAlignmentFar);
-    g.DrawString(b, -1, app.fBase, RectF(24.0f, 728.0f, (REAL)(W - 48), 18.0f), &fr, &cb);
+    g.DrawString(b, -1, app.fBase, RectF(24.0f, 674.0f, (REAL)(W - 48), 16.0f), &fr, &cb);
 }
 
-void PaintSections(Graphics& g, int W) {
-    Header(g, L"ИНТЕРВАЛ КЛИКА", 54);
-    Header(g, L"КНОПКА МЫШИ", 228);
-    Header(g, L"ТИП КЛИКА", 294);
-    Header(g, L"ПОЗИЦИЯ КЛИКА", 398);
-    Header(g, L"РЕЖИМ", 506);
-    Header(g, L"ГОРЯЧАЯ КЛАВИША", 650);
+void PaintSectionsBase(Graphics& g, int W) {
+    Header(g, L"ИНТЕРВАЛ КЛИКА", 50);
+    Header(g, L"КНОПКА МЫШИ", 200);
+    Header(g, L"ТИП КЛИКА", 262);
+    Header(g, L"ПОЗИЦИЯ КЛИКА", 358);
+    Header(g, L"РЕЖИМ", 460);
+    Header(g, L"ГОРЯЧАЯ КЛАВИША", 596);
 
     SolidBrush lb(Col(theme::kText));
 
     // панели Ч М С мс
     const wchar_t* units[4] = { L"ч", L"м", L"с", L"мс" };
     for (int i = 0; i < 4; ++i) {
-        PaintEditOutline(g, app.rcPanels[i], i == 0 ? app.focusedEdit == app.edH
-                              : i == 1 ? app.focusedEdit == app.edM
-                              : i == 2 ? app.focusedEdit == app.edS
-                                       : app.focusedEdit == app.edMs);
+        PaintEditOutline(g, app.rcPanels[i], false, false);
         StringFormat cf;
         cf.SetAlignment(StringAlignmentCenter);
         g.DrawString(units[i], -1, app.fSmall,
-                     RectF((REAL)app.rcPanels[i].left, 118.0f, (REAL)(app.rcPanels[i].right - app.rcPanels[i].left), 14.0f),
+                     RectF((REAL)app.rcPanels[i].left, 104.0f, (REAL)(app.rcPanels[i].right - app.rcPanels[i].left), 14.0f),
                      &cf, &lb);
     }
 
-    PaintCheck(g, app.rcCk, app.set.randomInterval, L"Случайный интервал (мс)", app.hoverRow == 1);
+    PaintCheck(g, app.rcCk, app.set.randomInterval, L"Случайный интервал (мс)", false);
 
-    g.DrawString(L"От:", -1, app.fBase, PointF(24.0f, 170.0f), &lb);
-    g.DrawString(L"До:", -1, app.fBase, PointF(132.0f, 170.0f), &lb);
-    g.DrawString(L"мс", -1, app.fSmall, PointF(238.0f, 172.0f), &lb);
-    PaintEditOutline(g, app.rcRandMin, app.focusedEdit == app.edRandMin);
-    PaintEditOutline(g, app.rcRandMax, app.focusedEdit == app.edRandMax);
+    g.DrawString(L"От:", -1, app.fBase, PointF(24.0f, 154.0f), &lb);
+    g.DrawString(L"До:", -1, app.fBase, PointF(132.0f, 154.0f), &lb);
+    g.DrawString(L"мс", -1, app.fSmall, PointF(238.0f, 156.0f), &lb);
+    PaintEditOutline(g, app.rcRandMin, false, false);
+    PaintEditOutline(g, app.rcRandMax, false, false);
 
-    PaintRadio(g, app.rcBtn[0], app.set.button == 0, L"ЛКМ", app.hoverRow == 2);
-    PaintRadio(g, app.rcBtn[1], app.set.button == 1, L"ПКМ", app.hoverRow == 2);
-    PaintRadio(g, app.rcBtn[2], app.set.button == 2, L"Средняя", app.hoverRow == 2);
+    PaintRadio(g, app.rcBtn[0], app.set.button == 0, L"ЛКМ", false);
+    PaintRadio(g, app.rcBtn[1], app.set.button == 1, L"ПКМ", false);
+    PaintRadio(g, app.rcBtn[2], app.set.button == 2, L"Средняя", false);
 
-    PaintRadio(g, app.rcType[0], app.set.clickType == 0, L"Один", app.hoverRow == 3);
-    PaintRadio(g, app.rcType[1], app.set.clickType == 1, L"Двойной", app.hoverRow == 3);
-    PaintRadio(g, app.rcType[2], app.set.clickType == 2, L"Тройной", app.hoverRow == 3);
-    PaintRadio(g, app.rcType[3], app.set.clickType == 3, L"Удержание", app.hoverRow == 3);
+    PaintRadio(g, app.rcType[0], app.set.clickType == 0, L"Один", false);
+    PaintRadio(g, app.rcType[1], app.set.clickType == 1, L"Двойной", false);
+    PaintRadio(g, app.rcType[2], app.set.clickType == 2, L"Тройной", false);
+    PaintRadio(g, app.rcType[3], app.set.clickType == 3, L"Удержание", false);
 
-    PaintCheck(g, app.rcFix, app.set.fixedPos, L"Клик в фиксированной точке", app.hoverRow == 5);
-    g.DrawString(L"X:", -1, app.fBase, PointF(24.0f, 450.0f), &lb);
-    g.DrawString(L"Y:", -1, app.fBase, PointF(126.0f, 450.0f), &lb);
-    PaintEditOutline(g, app.rcX, app.focusedEdit == app.edX);
-    PaintEditOutline(g, app.rcY, app.focusedEdit == app.edY);
-    PaintButton(g, app.rcPickBtn, L"Выбрать", false, !app.running, app.hoverPick);
+    PaintCheck(g, app.rcFix, app.set.fixedPos, L"Клик в фиксированной точке", false);
+    g.DrawString(L"X:", -1, app.fBase, PointF(24.0f, 408.0f), &lb);
+    g.DrawString(L"Y:", -1, app.fBase, PointF(126.0f, 408.0f), &lb);
+    PaintEditOutline(g, app.rcX, false, false);
+    PaintEditOutline(g, app.rcY, false, false);
+    PaintButton(g, app.rcPickBtn, L"Выбрать", false, !app.running, false);
 
-    PaintRadio(g, app.rcMode[0], !app.set.fixedCount && app.set.runSeconds == 0, L"Бесконечно", app.hoverRow == 4);
-    PaintRadio(g, app.rcMode[1], app.set.fixedCount, L"Количество:", app.hoverRow == 4);
-    PaintEditOutline(g, app.rcEdCount, app.focusedEdit == app.edCount);
-    PaintRadio(g, app.rcMode[2], app.set.runSeconds > 0, L"Время (сек):", app.hoverRow == 4);
-    PaintEditOutline(g, app.rcEdTime, app.focusedEdit == app.edTime);
-    g.DrawString(L"Задержка (сек):", -1, app.fBase, PointF(24.0f, 594.0f), &lb);
-    PaintEditOutline(g, app.rcEdDelay, app.focusedEdit == app.edDelay);
+    PaintRadio(g, app.rcMode[0], !app.set.fixedCount && app.set.runSeconds == 0, L"Бесконечно", false);
+    PaintRadio(g, app.rcMode[1], app.set.fixedCount, L"Количество:", false);
+    PaintEditOutline(g, app.rcEdCount, false, false);
+    PaintRadio(g, app.rcMode[2], app.set.runSeconds > 0, L"Время (сек):", false);
+    PaintEditOutline(g, app.rcEdTime, false, false);
+    g.DrawString(L"Задержка (сек):", -1, app.fBase, PointF(24.0f, 546.0f), &lb);
+    PaintEditOutline(g, app.rcEdDelay, false, false);
 
-    PaintEditOutline(g, app.rcEdHot, app.focusedEdit == app.edHot);
+    PaintEditOutline(g, app.rcEdHot, false, false);
     SolidBrush hb(Col(theme::kTextDim));
-    g.DrawString(L"Горячая клавиша — старт/стоп", -1, app.fSmall, PointF(32.0f, 712.0f), &hb);
+    g.DrawString(L"Горячая клавиша — старт/стоп", -1, app.fSmall, PointF(32.0f, 652.0f), &hb);
 
-    PaintStatus(g, W);
-
-    PaintButton(g, app.rcBtnStart, L"СТАРТ", true, !app.running, app.hoverStart);
-    PaintButton(g, app.rcBtnStop, L"СТОП", false, app.running, app.hoverStop);
+    PaintButton(g, app.rcBtnStart, L"СТАРТ", true, !app.running, false);
+    PaintButton(g, app.rcBtnStop, L"СТОП", false, app.running, false);
 }
 
-void Paint() {
-    PAINTSTRUCT ps;
-    HDC dc = BeginPaint(app.hwnd, &ps);
+void PaintOverlay(Graphics& g, int W) {
+    if (app.hoverMin)
+        DrawTitleBtn(g, app.rcMinBtn, L"\u2013", true, false);
+    if (app.hoverClose)
+        DrawTitleBtn(g, app.rcCloseBtn, L"\u00D7", true, true);
+
+    switch (app.hover) {
+        case 1: PaintCheck(g, app.rcCk, app.set.randomInterval, L"Случайный интервал (мс)", true); break;
+        case 2: PaintRadio(g, app.rcBtn[0], app.set.button == 0, L"ЛКМ", true); break;
+        case 3: PaintRadio(g, app.rcBtn[1], app.set.button == 1, L"ПКМ", true); break;
+        case 4: PaintRadio(g, app.rcBtn[2], app.set.button == 2, L"Средняя", true); break;
+        case 5: PaintRadio(g, app.rcType[0], app.set.clickType == 0, L"Один", true); break;
+        case 6: PaintRadio(g, app.rcType[1], app.set.clickType == 1, L"Двойной", true); break;
+        case 7: PaintRadio(g, app.rcType[2], app.set.clickType == 2, L"Тройной", true); break;
+        case 8: PaintRadio(g, app.rcType[3], app.set.clickType == 3, L"Удержание", true); break;
+        case 9: PaintCheck(g, app.rcFix, app.set.fixedPos, L"Клик в фиксированной точке", true); break;
+        case 10: PaintRadio(g, app.rcMode[0], !app.set.fixedCount && app.set.runSeconds == 0, L"Бесконечно", true); break;
+        case 11: PaintRadio(g, app.rcMode[1], app.set.fixedCount, L"Количество:", true); break;
+        case 12: PaintRadio(g, app.rcMode[2], app.set.runSeconds > 0, L"Время (сек):", true); break;
+    }
+
+    if (app.hoveredEdit || app.focusedEdit) {
+        HWND es[12] = { app.edH, app.edM, app.edS, app.edMs, app.edRandMin, app.edRandMax,
+                        app.edCount, app.edTime, app.edDelay, app.edX, app.edY, app.edHot };
+        const RECT* rs[12] = { &app.rcPanels[0], &app.rcPanels[1], &app.rcPanels[2], &app.rcPanels[3],
+                               &app.rcRandMin, &app.rcRandMax, &app.rcEdCount, &app.rcEdTime,
+                               &app.rcEdDelay, &app.rcX, &app.rcY, &app.rcEdHot };
+        for (int i = 0; i < 12; ++i)
+            if (es[i] == app.hoveredEdit || es[i] == app.focusedEdit)
+                PaintEditOutline(g, *rs[i], es[i] == app.focusedEdit, es[i] == app.hoveredEdit);
+    }
+
+    if (app.hoverPick)
+        PaintButton(g, app.rcPickBtn, L"Выбрать", false, !app.running, true);
+    if (app.hoverStart)
+        PaintButton(g, app.rcBtnStart, L"СТАРТ", true, !app.running, true);
+    if (app.hoverStop)
+        PaintButton(g, app.rcBtnStop, L"СТОП", false, app.running, true);
+
+    PaintStatus(g, W);
+}
+
+void Paint(HDC dc) {
     RECT rc;
     GetClientRect(app.hwnd, &rc);
     const int W = rc.right;
     const int H = rc.bottom;
 
-    Bitmap bmp(W, H);
-    {
-        Graphics gd(&bmp);
-        gd.SetSmoothingMode(SmoothingModeAntiAlias);
-        gd.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
-        gd.SetPixelOffsetMode(PixelOffsetModeHalf);
-        gd.Clear(Col(theme::kBg));
+    if (!app.cache || app.cacheDirty) {
+        if (!app.cache)
+            app.cache = new Gdiplus::Bitmap(kWndW, kWndH);
+        {
+            Graphics gd(app.cache);
+            gd.SetSmoothingMode(SmoothingModeAntiAlias);
+            gd.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+            gd.SetPixelOffsetMode(PixelOffsetModeHalf);
+            gd.Clear(Col(theme::kBg));
 
-        SolidBrush edge(Col(theme::kBorder));
-        gd.FillRectangle(&edge, 0.0f, 0.0f, (REAL)W, 1.0f);
-        gd.FillRectangle(&edge, 0.0f, (REAL)(H - 1), (REAL)W, 1.0f);
-        gd.FillRectangle(&edge, 0.0f, 0.0f, 1.0f, (REAL)H);
-        gd.FillRectangle(&edge, (REAL)(W - 1), 0.0f, 1.0f, (REAL)H);
+            SolidBrush edge(Col(theme::kBorder));
+            gd.FillRectangle(&edge, 0.0f, 0.0f, (REAL)W, 1.0f);
+            gd.FillRectangle(&edge, 0.0f, (REAL)(H - 1), (REAL)W, 1.0f);
+            gd.FillRectangle(&edge, 0.0f, 0.0f, 1.0f, (REAL)H);
+            gd.FillRectangle(&edge, (REAL)(W - 1), 0.0f, 1.0f, (REAL)H);
 
-        PaintTitle(gd, W);
-        PaintSections(gd, W);
+            PaintTitle(gd, W);
+            PaintSectionsBase(gd, W);
+        }
+        app.cacheDirty = false;
     }
 
     Graphics gdc(dc);
-    gdc.DrawImage(&bmp, 0, 0);
-    EndPaint(app.hwnd, &ps);
+    gdc.SetSmoothingMode(SmoothingModeAntiAlias);
+    gdc.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+    gdc.DrawImage(app.cache, 0, 0);
+    PaintOverlay(gdc, W);
 }
 
 // ---------- редактирование ----------
@@ -591,12 +679,37 @@ LRESULT CALLBACK EditProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             app.set.hotkeyVk = (UINT)w;
             app.set.hotkeyMod = 0;
-            app.capturing = false;
             RegisterHotkeyNoBox();
             SetWindowTextW(h, HotkeyName().c_str());
-            SaveSettings(app.set);
             InvalidateRect(app.hwnd, nullptr, FALSE);
-            return 0;
+            return 0; // остаёмся в режиме захвата: следующая клавиша поставит другую
+        }
+    } else if (m == WM_MOUSEMOVE) {
+        if (app.hoveredEdit != h) {
+            if (app.hoveredEdit) {
+                RECT r = EditRectOf(app.hoveredEdit);
+                if (r.right) {
+                    RECT o = Expanded(r, 2);
+                    InvalidateRect(app.hwnd, &o, FALSE);
+                }
+            }
+            app.hoveredEdit = h;
+            RECT r = EditRectOf(h);
+            if (r.right) {
+                RECT o = Expanded(r, 2);
+                InvalidateRect(app.hwnd, &o, FALSE);
+            }
+            TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, h, 0 };
+            TrackMouseEvent(&tme);
+        }
+    } else if (m == WM_MOUSELEAVE) {
+        if (app.hoveredEdit == h) {
+            app.hoveredEdit = nullptr;
+            RECT r = EditRectOf(h);
+            if (r.right) {
+                RECT o = Expanded(r, 2);
+                InvalidateRect(app.hwnd, &o, FALSE);
+            }
         }
     }
     return CallWindowProcW(g_origEdit, h, m, w, l);
@@ -608,12 +721,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
             InitRects();
-            LoadSettings(app.set);
 
-            app.hFontBase = CreateFontW(-13, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+            app.hFontBase = CreateFontW(-16, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
                                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-            app.hFontBold = CreateFontW(-13, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
+            app.hFontBold = CreateFontW(-16, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
                                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 
@@ -634,18 +746,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return e;
             };
 
-            app.edH = makeEdit(L"0", 24, 82, 62, 32, ES_NUMBER | ES_CENTER, (HMENU)1);
-            app.edM = makeEdit(L"0", 95, 82, 62, 32, ES_NUMBER | ES_CENTER, (HMENU)2);
-            app.edS = makeEdit(L"0", 166, 82, 62, 32, ES_NUMBER | ES_CENTER, (HMENU)3);
-            app.edMs = makeEdit(L"100", 237, 82, 62, 32, ES_NUMBER | ES_CENTER, (HMENU)4);
-            app.edRandMin = makeEdit(L"100", 54, 166, 70, 32, ES_NUMBER, (HMENU)5);
-            app.edRandMax = makeEdit(L"300", 160, 166, 70, 32, ES_NUMBER, (HMENU)6);
-            app.edCount = makeEdit(L"100", 276, 532, 80, 32, ES_NUMBER, (HMENU)7);
-            app.edTime = makeEdit(L"0", 164, 558, 80, 32, ES_NUMBER, (HMENU)8);
-            app.edDelay = makeEdit(L"0", 164, 590, 80, 32, ES_NUMBER, (HMENU)9);
-            app.edX = makeEdit(L"0", 48, 446, 70, 32, ES_CENTER | ES_READONLY, (HMENU)10);
-            app.edY = makeEdit(L"0", 150, 446, 70, 32, ES_CENTER | ES_READONLY, (HMENU)11);
-            app.edHot = makeEdit(L"", 24, 676, 332, 32, ES_CENTER | ES_READONLY, (HMENU)12);
+            app.edH = makeEdit(L"0", 24, 74, 62, 26, ES_NUMBER | ES_CENTER, (HMENU)1);
+            app.edM = makeEdit(L"0", 95, 74, 62, 26, ES_NUMBER | ES_CENTER, (HMENU)2);
+            app.edS = makeEdit(L"0", 166, 74, 62, 26, ES_NUMBER | ES_CENTER, (HMENU)3);
+            app.edMs = makeEdit(L"100", 237, 74, 62, 26, ES_NUMBER | ES_CENTER, (HMENU)4);
+            app.edRandMin = makeEdit(L"100", 54, 150, 70, 26, ES_NUMBER, (HMENU)5);
+            app.edRandMax = makeEdit(L"300", 160, 150, 70, 26, ES_NUMBER, (HMENU)6);
+            app.edCount = makeEdit(L"100", 276, 486, 80, 26, ES_NUMBER, (HMENU)7);
+            app.edTime = makeEdit(L"0", 164, 512, 80, 26, ES_NUMBER, (HMENU)8);
+            app.edDelay = makeEdit(L"0", 164, 542, 80, 26, ES_NUMBER, (HMENU)9);
+            app.edX = makeEdit(L"0", 48, 404, 70, 26, ES_CENTER | ES_READONLY, (HMENU)10);
+            app.edY = makeEdit(L"0", 150, 404, 70, 26, ES_CENTER | ES_READONLY, (HMENU)11);
+            app.edHot = makeEdit(L"", 24, 622, 332, 26, ES_CENTER | ES_READONLY, (HMENU)12);
 
             g_origEdit = (WNDPROC)SetWindowLongPtrW(app.edH, GWLP_WNDPROC, (LONG_PTR)EditProc);
             HWND edits[] = { app.edM, app.edS, app.edMs, app.edRandMin, app.edRandMax,
@@ -681,25 +793,51 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             L"Не удалось зарегистрировать горячую клавишу — она занята другим приложением.",
                             L"AutoCliker-Siris", MB_OK | MB_ICONWARNING);
             }
-            SetTimer(hwnd, kTimerId, 100, nullptr);
+            SetTimer(hwnd, kTimerId, 50, nullptr);
             return 0;
         }
 
-        case WM_PAINT:
-            Paint();
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(hwnd, &ps);
+            Paint(dc);
+            EndPaint(hwnd, &ps);
             return 0;
+        }
+
+        case WM_PRINT: {
+            if (lParam & PRF_CLIENT) {
+                Paint((HDC)wParam);
+                if (lParam & PRF_CHILDREN)
+                    EnumChildWindows(hwnd, PrintChild, (LPARAM)wParam);
+            }
+            return 0;
+        }
 
         case WM_ERASEBKGND:
             return 1;
 
         case WM_TIMER:
-            if (wParam == kTimerId && app.running)
-                InvalidateRect(hwnd, &app.rcStatus, FALSE);
-            else if (wParam == kPickTimerId && app.picking) {
-                POINT c;
-                GetCursorPos(&c);
-                if (app.hint)
-                    MoveWindow(app.hint, c.x + 24, c.y + 24, 300, 40, TRUE);
+            if (wParam == kTimerId) {
+                if (app.running) {
+                    app.pulse ^= 1;
+                    InvalidateRect(hwnd, &app.rcStatus, FALSE);
+                    // защита: курсор вернулся на окно приложения — стоп
+                    POINT c;
+                    GetCursorPos(&c);
+                    RECT wr;
+                    GetWindowRect(hwnd, &wr);
+                    const bool inside = PtIn(wr, c);
+                    if (!app.guardReady) {
+                        if (!inside)
+                            app.guardReady = true;
+                    } else if (inside) {
+                        app.guardReady = false;
+                        app.clicker.Stop();
+                        app.running = false;
+                        InvalidateAll();
+                    }
+                }
             }
             return 0;
 
@@ -717,10 +855,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_COMMAND:
-            if (HIWORD(wParam) == EN_CHANGE) {
+            if (HIWORD(wParam) == EN_CHANGE)
                 ApplyEditsToSettings();
-                SaveSettings(app.set);
-            }
             return 0;
 
         case WM_CTLCOLORSTATIC: {
@@ -735,6 +871,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             HWND c = (HWND)lParam;
             bool en = IsWindowEnabled(c);
             if ((c == app.edRandMin || c == app.edRandMax) && !app.set.randomInterval)
+                en = false;
+            if ((c == app.edX || c == app.edY) && !app.set.fixedPos)
                 en = false;
             if (c == app.edCount && !app.set.fixedCount)
                 en = false;
@@ -790,56 +928,50 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             const bool nStop = PtIn(app.rcBtnStop, p);
             const bool nPick = PtIn(app.rcPickBtn, p);
 
-            int nRow = 0;
+            int nh = 0;
             if (PtIn(app.rcCk, p))
-                nRow = 1;
+                nh = 1;
+            else if (PtIn(app.rcBtn[0], p))
+                nh = 2;
+            else if (PtIn(app.rcBtn[1], p))
+                nh = 3;
+            else if (PtIn(app.rcBtn[2], p))
+                nh = 4;
+            else if (PtIn(app.rcType[0], p))
+                nh = 5;
+            else if (PtIn(app.rcType[1], p))
+                nh = 6;
+            else if (PtIn(app.rcType[2], p))
+                nh = 7;
+            else if (PtIn(app.rcType[3], p))
+                nh = 8;
             else if (PtIn(app.rcFix, p))
-                nRow = 5;
-            else if (PtIn(app.rcMode[0], p) || PtIn(app.rcMode[1], p) || PtIn(app.rcMode[2], p))
-                nRow = 4;
-            else if (PtIn(app.rcType[0], p) || PtIn(app.rcType[1], p) || PtIn(app.rcType[2], p) || PtIn(app.rcType[3], p))
-                nRow = 3;
-            else if (PtIn(app.rcBtn[0], p) || PtIn(app.rcBtn[1], p) || PtIn(app.rcBtn[2], p))
-                nRow = 2;
+                nh = 9;
+            else if (PtIn(app.rcMode[0], p))
+                nh = 10;
+            else if (PtIn(app.rcMode[1], p))
+                nh = 11;
+            else if (PtIn(app.rcMode[2], p))
+                nh = 12;
 
-            const RECT* rowRect = [](int row) -> const RECT* {
-                switch (row) {
-                    case 1: return &app.rcRow1;
-                    case 2: return &app.rcRow2;
-                    case 3: return &app.rcRow3;
-                    case 4: return &app.rcRow4;
-                    case 5: return &app.rcRow5;
-                    default: return nullptr;
-                }
-            }(nRow);
-            const RECT* oldRowRect = [](int row) -> const RECT* {
-                switch (row) {
-                    case 1: return &app.rcRow1;
-                    case 2: return &app.rcRow2;
-                    case 3: return &app.rcRow3;
-                    case 4: return &app.rcRow4;
-                    case 5: return &app.rcRow5;
-                    default: return nullptr;
-                }
-            }(app.hoverRow);
-
-            if (nRow != app.hoverRow) {
-                if (oldRowRect)
-                    InvalidateRect(hwnd, oldRowRect, FALSE);
-                app.hoverRow = nRow;
-                if (rowRect)
-                    InvalidateRect(hwnd, rowRect, FALSE);
+            if (nh != app.hover) {
+                if (const RECT* r = HoverRect(app.hover))
+                    InvalidateRect(hwnd, r, FALSE);
+                app.hover = nh;
+                if (const RECT* r = HoverRect(nh))
+                    InvalidateRect(hwnd, r, FALSE);
             }
             if (nMin != app.hoverMin) { app.hoverMin = nMin; InvalidateRect(hwnd, &app.rcMinBtn, FALSE); }
             if (nClose != app.hoverClose) { app.hoverClose = nClose; InvalidateRect(hwnd, &app.rcCloseBtn, FALSE); }
             if (nStart != app.hoverStart) { app.hoverStart = nStart; InvalidateRect(hwnd, &app.rcBtnStart, FALSE); }
             if (nStop != app.hoverStop) { app.hoverStop = nStop; InvalidateRect(hwnd, &app.rcBtnStop, FALSE); }
             if (nPick != app.hoverPick) { app.hoverPick = nPick; InvalidateRect(hwnd, &app.rcPickBtn, FALSE); }
+
             return 0;
         }
 
         case WM_MOUSELEAVE:
-            app.hoverRow = 0;
+            app.hover = 0;
             app.hoverMin = app.hoverClose = app.hoverStart = app.hoverStop = app.hoverPick = false;
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -858,26 +990,30 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 app.set.randomInterval = !app.set.randomInterval;
                 EnableWindow(app.edRandMin, app.set.randomInterval);
                 EnableWindow(app.edRandMax, app.set.randomInterval);
-                InvalidateRect(hwnd, &app.rcRow1, FALSE);
+                InvalidateAll();
+                InvalidateRect(app.edRandMin, nullptr, TRUE);
+                InvalidateRect(app.edRandMax, nullptr, TRUE);
                 return 0;
             }
             for (int i = 0; i < 3; ++i) {
                 if (PtIn(app.rcBtn[i], p)) {
                     app.set.button = i;
-                    InvalidateRect(hwnd, &app.rcRow2, FALSE);
+                    InvalidateAll();
                     return 0;
                 }
             }
             for (int i = 0; i < 4; ++i) {
                 if (PtIn(app.rcType[i], p)) {
                     app.set.clickType = i;
-                    InvalidateRect(hwnd, &app.rcRow3, FALSE);
+                    InvalidateAll();
                     return 0;
                 }
             }
             if (PtIn(app.rcFix, p)) {
                 app.set.fixedPos = !app.set.fixedPos;
-                InvalidateRect(hwnd, &app.rcRow5, FALSE);
+                InvalidateAll();
+                InvalidateRect(app.edX, nullptr, TRUE);
+                InvalidateRect(app.edY, nullptr, TRUE);
                 return 0;
             }
             if (PtIn(app.rcPickBtn, p)) {
@@ -888,21 +1024,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 app.set.fixedCount = false;
                 app.set.runSeconds = 0;
                 EnableWindow(app.edCount, FALSE);
-                InvalidateRect(hwnd, &app.rcRow4, FALSE);
+                InvalidateAll();
+                InvalidateRect(app.edCount, nullptr, TRUE);
                 return 0;
             }
             if (PtIn(app.rcMode[1], p)) {
                 app.set.fixedCount = true;
                 app.set.runSeconds = 0;
                 EnableWindow(app.edCount, TRUE);
-                InvalidateRect(hwnd, &app.rcRow4, FALSE);
+                InvalidateAll();
+                InvalidateRect(app.edCount, nullptr, TRUE);
                 return 0;
             }
             if (PtIn(app.rcMode[2], p)) {
                 app.set.fixedCount = false;
                 app.set.runSeconds = std::max(ReadEditInt(app.edTime, 0), 1);
                 EnableWindow(app.edCount, FALSE);
-                InvalidateRect(hwnd, &app.rcRow4, FALSE);
+                InvalidateAll();
+                InvalidateRect(app.edCount, nullptr, TRUE);
                 return 0;
             }
             if (PtIn(app.rcBtnStart, p)) {
@@ -918,7 +1057,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_CLOSE:
             app.clicker.Stop();
-            SaveSettings(app.set);
             if (app.hook) {
                 UnhookWindowsHookEx(app.hook);
                 app.hook = nullptr;
@@ -929,8 +1067,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_DESTROY:
             KillTimer(hwnd, kTimerId);
-            KillTimer(hwnd, kPickTimerId);
             UnregisterHotKey(hwnd, kHotkeyId);
+            delete app.cache;
+            app.cache = nullptr;
             DeleteObject(app.hFontBase);
             DeleteObject(app.hFontBold);
             delete app.fBase;
@@ -975,8 +1114,13 @@ int RunApp(HINSTANCE inst) {
     AdjustWindowRectEx(&wr, WS_POPUP, FALSE, WS_EX_APPWINDOW);
     const int w = wr.right - wr.left;
     const int h = wr.bottom - wr.top;
-    const int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
-    const int y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
+
+    RECT wa;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    int x = wa.left + (wa.right - wa.left - w) / 2;
+    int y = wa.top + (wa.bottom - wa.top - h) / 2;
+    x = std::clamp(x, (int)wa.left, (int)wa.right - w);
+    y = std::clamp(y, (int)wa.top, (int)wa.bottom - h);
 
     app.hwnd = CreateWindowExW(WS_EX_APPWINDOW, wc.lpszClassName, L"AutoCliker-Siris",
                                WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN, x, y, w, h,

@@ -21,5 +21,3 @@ struct ClickSettings {
 };
 
 std::wstring SettingsPath();
-void SaveSettings(const ClickSettings& s);
-void LoadSettings(ClickSettings& s);
