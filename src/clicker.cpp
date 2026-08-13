@@ -106,7 +106,9 @@ void Clicker::Run() {
             SetCursorPos(s_.posX, s_.posY);
 
         double interval;
-        if (s_.randomInterval && s_.maxMs > s_.minMs) {
+        if (s_.extra) {
+            interval = 0.0; // экстра: без ограничения, максимальная скорость
+        } else if (s_.randomInterval && s_.maxMs > s_.minMs) {
             const uint32_t span = (uint32_t)(s_.maxMs - s_.minMs + 1);
             interval = (double)(s_.minMs + (int)(rng() % span));
         } else if (s_.randomInterval) {
@@ -118,7 +120,7 @@ void Clicker::Run() {
         if (!hold) {
             const int n = s_.clickType == 2 ? 3 : (s_.clickType == 1 ? 2 : 1);
             if (n > 1) {
-                const double gap = std::clamp(interval / 10.0, 1.0, 10.0);
+                const double gap = s_.extra ? 0.0 : std::clamp(interval / 10.0, 1.0, 10.0);
                 const double start = NowMs();
                 for (int i = 0; i < n; ++i) {
                     ClickOnce(s_.button);

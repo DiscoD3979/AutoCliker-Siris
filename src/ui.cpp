@@ -56,7 +56,7 @@ struct App {
     int pulse = 0;
 
     RECT rcPanels[4]{}, rcCk{}, rcRandMin{}, rcRandMax{}, rcFix{}, rcX{}, rcY{}, rcPickBtn{};
-    RECT rcBtn[3]{}, rcType[4]{}, rcMode[3]{};
+    RECT rcBtn[3]{}, rcType[4]{}, rcMode[3]{}, rcExtra{};
     RECT rcEdCount{}, rcEdTime{}, rcEdDelay{}, rcEdHot{};
     RECT rcBtnStart{}, rcBtnStop{}, rcMinBtn{}, rcCloseBtn{};
     RECT rcStatus{};
@@ -143,6 +143,7 @@ void InitRects() {
     app.rcMode[0] = { 24, 486, 150, 510 };
     app.rcMode[1] = { 164, 486, 272, 510 };
     app.rcMode[2] = { 24, 512, 150, 536 };
+    app.rcExtra = { 24, 570, 356, 594 };
     app.rcEdCount = { 276, 486, 356, 512 };
     app.rcEdTime = { 164, 512, 244, 538 };
     app.rcEdDelay = { 164, 542, 244, 568 };
@@ -161,6 +162,7 @@ const RECT* HoverRect(int id) {
         case 5: case 6: case 7: case 8: return &app.rcType[id - 5];
         case 9: return &app.rcFix;
         case 10: case 11: case 12: return &app.rcMode[id - 10];
+        case 13: return &app.rcExtra;
         default: return nullptr;
     }
 }
@@ -563,6 +565,7 @@ void PaintSectionsBase(Graphics& g, int W) {
     PaintEditOutline(g, app.rcEdCount, false, false);
     PaintRadio(g, app.rcMode[2], app.set.runSeconds > 0, L"Время (сек):", false);
     PaintEditOutline(g, app.rcEdTime, false, false);
+    PaintCheck(g, app.rcExtra, app.set.extra, L"Экстра 10000 (макс. скорость)", false);
     g.DrawString(L"Задержка (сек):", -1, app.fBase, PointF(24.0f, 546.0f), &lb);
     PaintEditOutline(g, app.rcEdDelay, false, false);
 
@@ -593,6 +596,7 @@ void PaintOverlay(Graphics& g, int W) {
         case 10: PaintRadio(g, app.rcMode[0], !app.set.fixedCount && app.set.runSeconds == 0, L"Бесконечно", true); break;
         case 11: PaintRadio(g, app.rcMode[1], app.set.fixedCount, L"Количество:", true); break;
         case 12: PaintRadio(g, app.rcMode[2], app.set.runSeconds > 0, L"Время (сек):", true); break;
+        case 13: PaintCheck(g, app.rcExtra, app.set.extra, L"Экстра 10000 (макс. скорость)", true); break;
     }
 
     if (app.hoveredEdit || app.focusedEdit) {
@@ -910,6 +914,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             for (const RECT& r : app.rcBtn) hot = hot || PtIn(r, p);
             for (const RECT& r : app.rcType) hot = hot || PtIn(r, p);
             for (const RECT& r : app.rcMode) hot = hot || PtIn(r, p);
+            hot = hot || PtIn(app.rcExtra, p);
             if (hot) {
                 SetCursor(LoadCursor(nullptr, IDC_HAND));
                 return TRUE;
@@ -953,6 +958,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 nh = 11;
             else if (PtIn(app.rcMode[2], p))
                 nh = 12;
+            else if (PtIn(app.rcExtra, p))
+                nh = 13;
 
             if (nh != app.hover) {
                 if (const RECT* r = HoverRect(app.hover))
@@ -1042,6 +1049,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 EnableWindow(app.edCount, FALSE);
                 InvalidateAll();
                 InvalidateRect(app.edCount, nullptr, TRUE);
+                return 0;
+            }
+            if (PtIn(app.rcExtra, p)) {
+                app.set.extra = !app.set.extra;
+                InvalidateAll();
                 return 0;
             }
             if (PtIn(app.rcBtnStart, p)) {

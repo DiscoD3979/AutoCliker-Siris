@@ -15,6 +15,7 @@ struct ClickSettings {
     bool fixedCount = false;
     int count = 100;
     int runSeconds = 0;         // 0 = бесконечно, иначе лимит по времени
+    bool extra = false;         // экстра: максимальная скорость (~10к кликов/с)
     int startDelayMs = 0;       // задержка перед стартом
     UINT hotkeyVk = VK_F6;
     int hotkeyMod = 0;
