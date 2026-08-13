@@ -7,6 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # статическая CRT — exe не требует рядом msvcp140.dll и т.п.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 
+# готовый exe складываем в Release/
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/Release")
+
 add_executable(AutoCliker-Siris WIN32
     src/main.cpp
     src/clicker.cpp

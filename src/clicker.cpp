@@ -1,6 +1,7 @@
 #include "clicker.h"
 #include <windows.h>
 #include <mmsystem.h>
+#include <algorithm>
 #include <random>
 
 namespace {
@@ -103,21 +104,6 @@ void Clicker::Run() {
         if (s_.fixedPos)
             SetCursorPos(s_.posX, s_.posY);
 
-        if (!hold) {
-            const int n = s_.clickType == 2 ? 3 : (s_.clickType == 1 ? 2 : 1);
-            for (int i = 0; i < n; ++i) {
-                ClickOnce(s_.button);
-                if (i + 1 < n)
-                    Sleep(30);
-            }
-        }
-        clicks_.fetch_add(1);
-
-        if (s_.fixedCount && ++done >= (long long)s_.count)
-            break;
-        if (s_.runSeconds > 0 && NowMs() - startT >= (double)s_.runSeconds * 1000.0)
-            break;
-
         double interval;
         if (s_.randomInterval && s_.maxMs > s_.minMs) {
             const uint32_t span = (uint32_t)(s_.maxMs - s_.minMs + 1);
@@ -127,6 +113,30 @@ void Clicker::Run() {
         } else {
             interval = s_.intervalMs > 0.0 ? s_.intervalMs : 1.0;
         }
+
+        if (!hold) {
+            const int n = s_.clickType == 2 ? 3 : (s_.clickType == 1 ? 2 : 1);
+            if (n > 1) {
+                const double gap = std::clamp(interval / 10.0, 1.0, 10.0);
+                const double start = NowMs();
+                for (int i = 0; i < n; ++i) {
+                    ClickOnce(s_.button);
+                    if (i + 1 < n) {
+                        const double target = start + gap * (i + 1);
+                        while (running_.load() && NowMs() < target) { }
+                    }
+                }
+            } else {
+                ClickOnce(s_.button);
+            }
+        }
+        clicks_.fetch_add(1);
+
+        if (s_.fixedCount && ++done >= (long long)s_.count)
+            break;
+        if (s_.runSeconds > 0 && NowMs() - startT >= (double)s_.runSeconds * 1000.0)
+            break;
+
         next += interval;
     }
 

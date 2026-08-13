@@ -15,4 +15,4 @@ if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
 echo.
 echo ===== Build successful =====
-echo Executable: build\AutoCliker-Siris.exe
+echo Executable: Release\AutoCliker-Siris.exe
